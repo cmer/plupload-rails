@@ -211,27 +211,80 @@
 		 */
 		init : function(uploader, callback) {
 			var features, xhr;
-
+			
+			function hasFiles(dataTransfer) {
+				if (!dataTransfer || typeof(dataTransfer.files) === "undefined") {
+					return false;
+				}
+				
+				var types = plupload.toArray(dataTransfer.types || []);
+				return types.indexOf("public.file-url") !== -1 || // Safari < 5
+					types.indexOf("application/x-moz-file") !== -1 || // Gecko < 1.9.2 (< Firefox 3.6)
+					types.indexOf("Files") !== -1 || // Standard
+					types.length === 0;
+			}
+			
+			function walkFileSystem(directory, callback, error) {
+				if (!callback.pending) {
+					callback.pending = 0;
+				}
+				if (!callback.files) {
+					callback.files = [];
+				}
+				
+				callback.pending++;
+				
+				var reader = directory.createReader(),
+						relativePath = directory.fullPath.replace(/^\//, "").replace(/(.+?)\/?$/, "$1/");
+				reader.readEntries(function(entries) {
+					callback.pending--;
+					plupload.each(entries, function(entry) {
+						if (entry.isFile) {
+							callback.pending++;
+							entry.file(function(File) {
+								File.relativePath = relativePath + File.name;
+								callback.files.push(File);
+								if (--callback.pending === 0) {
+									callback(callback.files);
+								}
+							}, error);
+						} else {
+							walkFileSystem(entry, callback, error);
+						}
+					});
+					
+					if (callback.pending === 0) {
+						callback(callback.files);
+					}
+				}, error);
+			}
+			
 			function addSelectedFiles(native_files) {
-				var file, i, files = [], id, fileNames = {};
+				var file, i, files = [], id, fileName, fileNames = {};
 
 				// Add the selected files to the file queue
 				for (i = 0; i < native_files.length; i++) {
 					file = native_files[i];
-										
+					fileName = file.fileName || file.name;
+					
+					// Safari on iOS 6 will name each picture "image.jpg"
+					if (fileName === "image.jpg" && native_files.length > 1) {
+	 					fileName = "image_" + (i + 1) + ".jpg";
+					}
+					
 					// Safari on Windows will add first file from dragged set multiple times
 					// @see: https://bugs.webkit.org/show_bug.cgi?id=37957
-					if (fileNames[file.name]) {
+					if (fileNames[fileName]) {
 						continue;
 					}
-					fileNames[file.name] = true;
+					fileNames[fileName] = true;
 
 					// Store away gears blob internally
 					id = plupload.guid();
 					html5files[id] = file;
 
 					// Expose id, name and size
-					files.push(new plupload.File(id, file.fileName || file.name, file.fileSize || file.size)); // fileName / fileSize depricated
+					files.push(new plupload.File(id, fileName, file.fileSize || file.size, file.relativePath)); // fileName / fileSize deprecated
 				}
 
 				// Trigger FilesAdded event if we added any
@@ -380,7 +433,7 @@
 
 							// Get or create drop zone
 							dropInputElm = document.getElementById(uploader.id + "_drop");
-							if (!dropInputElm) {
+							if (!dropInputElm && hasFiles(e.dataTransfer)) {
 								dropInputElm = document.createElement("input");
 								dropInputElm.setAttribute('type', "file");
 								dropInputElm.setAttribute('id', uploader.id + "_drop");
@@ -423,16 +476,30 @@
 
 					// Block browser default drag over
 					plupload.addEvent(dropElm, 'dragover', function(e) {
-						e.preventDefault();
+						if (hasFiles(e.dataTransfer)) {
+							e.preventDefault();
+						}
 					}, uploader.id);
 
 					// Attach drop handler and grab files
 					plupload.addEvent(dropElm, 'drop', function(e) {
 						var dataTransfer = e.dataTransfer;
-
-						// Add dropped files
-						if (dataTransfer && dataTransfer.files) {
-							addSelectedFiles(dataTransfer.files);
+						
+						if (!hasFiles(dataTransfer)) {
+							return;
+						}
+						
+						var items = dataTransfer.items || [], files = dataTransfer.files, firstEntry;
+						if (items[0] && items[0].webkitGetAsEntry && (firstEntry = items[0].webkitGetAsEntry())) {
+						  // Experimental way of uploading entire folders (only supported by chrome >= 21)
+							walkFileSystem(firstEntry.filesystem.root, function(files) {
+								addSelectedFiles(files);
+							}, function() {
+							  // Fallback to old way when error happens
+								addSelectedFiles(files);
+							});
+						} else {
+							addSelectedFiles(files);
 						}
 
 						e.preventDefault();
@@ -465,7 +532,7 @@
 							});
 						}
 						
-						zIndex = parseInt(plupload.getStyle(browseButton, 'z-index'), 10);
+						zIndex = parseInt(plupload.getStyle(browseButton, 'zIndex'), 10);
 						if (isNaN(zIndex)) {
 							zIndex = 0;
 						}						
